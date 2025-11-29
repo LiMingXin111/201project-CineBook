@@ -3,16 +3,36 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Service class handling core booking logic.
+ * Manages seat availability, booking creation, and order retrieval.
+ */
 public class BookingService {
     private BookingDAO bookingDAO;
+    private IScreeningService screeningService;
+    private IUserService userService;
 
-    public BookingService() {
+    /**
+     * Constructor with Dependency Injection.
+     * 
+     * @param screeningService Service to retrieve screening info (prices, layout)
+     * @param userService Service to retrieve user info
+     */
+    public BookingService(IScreeningService screeningService, IUserService userService) {
         this.bookingDAO = new BookingDAO();
+        this.screeningService = screeningService;
+        this.userService = userService;
     }
 
+    /**
+     * Retrieves the seat map for a given screening, merging static layout with dynamic booking status.
+     * 
+     * @param screeningId the ID of the screening
+     * @return a Map where key is seat number and value is status (AVAILABLE/SOLD)
+     */
     public Map<String, String> getSeatMap(int screeningId) {
-        // 1. Get all seats from Screening Service (Mock)
-        List<String> allSeats = MockServices.MockScreeningService.getLayout(screeningId);
+        // 1. Get all seats from Screening Service
+        List<String> allSeats = screeningService.getLayout(screeningId);
         
         // 2. Get booked seats from DB
         List<String> bookedSeats = bookingDAO.getBookedSeats(screeningId);
@@ -29,29 +49,47 @@ public class BookingService {
         return seatMap;
     }
 
-    public String attemptBooking(int userId, int screeningId, String seatNumber) {
+    /**
+     * Attempts to book a seat for the current user.
+     * 
+     * @param screeningId the screening ID
+     * @param seatNumber the seat number to book
+     * @throws BookingException if the booking fails (e.g., seat taken, invalid screening)
+     */
+    public void attemptBooking(int screeningId, String seatNumber) throws BookingException {
         // 1. Validate Screening
-        if (!MockServices.MockScreeningService.isValidScreening(screeningId)) {
-            return "Error: Invalid Screening ID";
+        if (!screeningService.isValidScreening(screeningId)) {
+            throw new BookingException("Invalid Screening ID: " + screeningId);
         }
         
-        // 2. Get Price
-        BigDecimal price = MockServices.MockScreeningService.getScreeningPrice(screeningId);
+        // 2. Get User
+        int userId = userService.getCurrentUserId();
         
-        // 3. Call DAO to create booking (handles concurrency via SP)
-        return bookingDAO.createBooking(userId, screeningId, seatNumber, price);
+        // 3. Get Price
+        BigDecimal price = screeningService.getScreeningPrice(screeningId);
+        
+        // 4. Call DAO
+        bookingDAO.createBooking(userId, screeningId, seatNumber, price);
     }
 
-    public List<Booking> getMyBookings(int userId) {
+    /**
+     * Retrieves all bookings for the current user.
+     * 
+     * @return List of Booking objects
+     */
+    public List<Booking> getMyBookings() {
+        int userId = userService.getCurrentUserId();
         return bookingDAO.getUserBookings(userId);
     }
 
-    public String cancelMyBooking(int userId, int bookingId) {
-        // In a real app, verify ownership first
-        // For now, we trust the caller or assume DAO handles it if we passed userId to DAO
-        // Let's add a check here if we had a getBookingById
-        
-        boolean success = bookingDAO.cancelBooking(bookingId);
-        return success ? "Booking Cancelled" : "Cancellation Failed";
+    /**
+     * Cancels a specific booking.
+     * 
+     * @param bookingId the ID of the booking to cancel
+     * @return true if successful, false otherwise
+     */
+    public boolean cancelMyBooking(int bookingId) {
+        // In a real app, we should verify that the booking belongs to the current user first.
+        return bookingDAO.cancelBooking(bookingId);
     }
 }
