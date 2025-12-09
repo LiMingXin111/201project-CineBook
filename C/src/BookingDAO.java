@@ -12,6 +12,14 @@ public class BookingDAO {
     private String dbPass;
 
     public BookingDAO() {
+        // Try to load the MySQL JDBC driver
+        try {
+            Class.forName("com.mysql.cj.jdbc.Driver");
+        } catch (ClassNotFoundException e) {
+            System.err.println("MySQL JDBC Driver not found. Please ensure it's in your classpath.");
+            e.printStackTrace();
+        }
+        
         loadProperties();
     }
 
