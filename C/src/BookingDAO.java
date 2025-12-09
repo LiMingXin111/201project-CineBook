@@ -1,20 +1,49 @@
+import java.io.IOException;
+import java.io.InputStream;
 import java.math.BigDecimal;
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Properties;
 
 public class BookingDAO {
-    // Placeholder connection details
-    private static final String DB_URL = "jdbc:mysql://localhost:3306/movie_db";
-    private static final String USER = "root";
-    private static final String PASS = "password";
+    private String dbUrl;
+    private String dbUser;
+    private String dbPass;
 
-    private Connection getConnection() throws SQLException {
-        // In a real app, use a connection pool
-        return DriverManager.getConnection(DB_URL, USER, PASS);
+    public BookingDAO() {
+        // Try to load the MySQL JDBC driver
+        try {
+            Class.forName("com.mysql.cj.jdbc.Driver");
+        } catch (ClassNotFoundException e) {
+            System.err.println("MySQL JDBC Driver not found. Please ensure it's in your classpath.");
+            e.printStackTrace();
+        }
+        
+        loadProperties();
     }
 
-    public String createBooking(int userId, int screeningId, String seatNumber, BigDecimal price) {
+    private void loadProperties() {
+        Properties prop = new Properties();
+        try (InputStream input = getClass().getClassLoader().getResourceAsStream("db.properties")) {
+            if (input == null) {
+                System.err.println("Sorry, unable to find db.properties");
+                return;
+            }
+            prop.load(input);
+            this.dbUrl = prop.getProperty("db.url");
+            this.dbUser = prop.getProperty("db.user");
+            this.dbPass = prop.getProperty("db.password");
+        } catch (IOException ex) {
+            ex.printStackTrace();
+        }
+    }
+
+    private Connection getConnection() throws SQLException {
+        return DriverManager.getConnection(dbUrl, dbUser, dbPass);
+    }
+
+    public void createBooking(int userId, int screeningId, String seatNumber, BigDecimal price) throws BookingException {
         String sql = "{CALL create_booking(?, ?, ?, ?, ?)}";
         
         try (Connection conn = getConnection();
@@ -28,11 +57,17 @@ public class BookingDAO {
             
             stmt.execute();
             
-            return stmt.getString(5);
+            String result = stmt.getString(5);
+            if (result.startsWith("FAIL")) {
+                if (result.contains("already taken")) {
+                    throw new SeatUnavailableException(seatNumber);
+                } else {
+                    throw new BookingException(result);
+                }
+            }
             
         } catch (SQLException e) {
-            e.printStackTrace();
-            return "ERROR: " + e.getMessage();
+            throw new BookingException("Database error: " + e.getMessage());
         }
     }
 
@@ -51,7 +86,7 @@ public class BookingDAO {
             }
             
         } catch (SQLException e) {
-            e.printStackTrace();
+            e.printStackTrace(); // In real app, log this
         }
         return bookedSeats;
     }
@@ -98,10 +133,5 @@ public class BookingDAO {
             e.printStackTrace();
             return false;
         }
-    }
-    
-    // Helper for testing without DB
-    public void setMockConnection() {
-        // TODO: Implement mock connection if needed for unit tests without DB
     }
 }
