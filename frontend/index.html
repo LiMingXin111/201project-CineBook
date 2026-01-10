@@ -1,0 +1,1781 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CineBook - Movie Ticketing System</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+  
+  <!-- Configure Tailwind custom theme -->
+  <script>
+    const API_BASE = 'http://localhost:8080/api';
+
+    async function apiRequest(path, options = {}) {
+      const config = {
+        method: options.method || 'GET',
+        headers: options.headers ? { ...options.headers } : {}
+      };
+      if (options.body !== undefined) {
+        config.body = options.body;
+        if (!config.headers['Content-Type']) {
+          config.headers['Content-Type'] = 'application/json';
+        }
+      }
+      const response = await fetch(`${API_BASE}${path}`, config);
+      const contentType = response.headers.get('Content-Type') || '';
+      let payload = null;
+      if (response.status !== 204) {
+        payload = contentType.includes('application/json')
+          ? await response.json()
+          : await response.text();
+      }
+      if (!response.ok) {
+        const message = payload && payload.message ? payload.message : `Request failed (${response.status})`;
+        throw new Error(message);
+      }
+      return payload;
+    }
+
+    function adminHeaders() {
+      return currentUser && currentUser.role === 'admin' ? { Admin: 'true' } : {};
+    }
+
+    function formatCurrency(amount) {
+      return `CNY ${Number(amount || 0).toLocaleString('en-US')}`;
+    }
+
+    function formatSeatLabel(index) {
+      const row = String.fromCharCode(65 + Math.floor(index / 8));
+      const number = (index % 8) + 1;
+      return `${row}${number}`;
+    }
+
+    function normalizePosterInput(value) {
+      if (!value) {
+        return '';
+      }
+      let trimmed = value.trim();
+      if (!trimmed) {
+        return '';
+      }
+      if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+          (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+        trimmed = trimmed.slice(1, -1).trim();
+      }
+      if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        trimmed = trimmed.slice(1, -1).trim();
+      }
+      trimmed = trimmed.replace(/\\/g, '/');
+      trimmed = trimmed.replace(/\s*[\[(]?\s*\d+\s*x\s*\d+\s*[\])]?$/i, '').trim();
+      return trimmed;
+    }
+
+    function ensurePosterPath(value) {
+      const normalized = normalizePosterInput(value);
+      if (!normalized) {
+        return '';
+      }
+      const lower = normalized.toLowerCase();
+      const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(normalized);
+      const isData = lower.startsWith('data:') || lower.startsWith('blob:');
+      const hasPathSeparator = normalized.includes('/');
+      if (!hasScheme && !isData &&
+          !normalized.startsWith('/') &&
+          !normalized.startsWith('./') &&
+          !normalized.startsWith('../') &&
+          !hasPathSeparator) {
+        return `poster/${normalized}`;
+      }
+      return normalized;
+    }
+
+    function resolvePosterUrl(value) {
+      const posterPath = ensurePosterPath(value);
+      if (!posterPath) {
+        return '';
+      }
+      const lower = posterPath.toLowerCase();
+      if (lower.startsWith('data:') || lower.startsWith('blob:')) {
+        return posterPath;
+      }
+      return encodeURI(posterPath);
+    }
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: '#E50914', // Primary red
+            dark: '#141414',    // Dark background
+            darker: '#0A0A0A',  // Deeper black
+            light: '#F5F5F1',   // Light text
+            gray: {
+              600: '#6D6D6D',
+              700: '#4A4A4A',
+              800: '#2D2D2D',
+              900: '#1A1A1A'
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+          },
+        },
+      }
+    }
+  </script>
+  
+  <style type="text/tailwindcss">
+    @layer utilities {
+      .content-auto {
+        content-visibility: auto;
+      }
+      .text-shadow {
+        text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+      }
+      .backdrop-blur {
+        backdrop-filter: blur(8px);
+      }
+      .seat-available {
+        @apply bg-gray-600 hover:bg-primary transition-colors duration-200 cursor-pointer;
+      }
+      .seat-selected {
+        @apply bg-primary border-primary;
+      }
+      .seat-unavailable {
+        @apply bg-red-700 text-white cursor-not-allowed;
+      }
+    }
+  </style>
+</head>
+<body class="bg-dark text-light min-h-screen flex flex-col">
+  <!-- Navigation -->
+  <header id="navbar" class="fixed top-0 left-0 right-0 z-50 transition-all duration-300">
+    <nav class="bg-dark/80 backdrop-blur px-4 py-3 md:px-8 flex items-center justify-between">
+      <div class="flex items-center space-x-2">
+        <i class="fa fa-film text-primary text-2xl"></i>
+        <h1 class="text-xl md:text-2xl font-bold text-white">CineBook</h1>
+      </div>
+      
+      <div class="hidden md:flex items-center space-x-8">
+        <a href="#movies" class="hover:text-primary transition-colors">Movies</a>
+        <a href="#history" class="hover:text-primary transition-colors hidden" id="history-link">My Orders</a>
+        <a href="#admin" class="hover:text-primary transition-colors hidden" id="admin-link">Admin Panel</a>
+      </div>
+      
+      <div class="flex items-center space-x-4">
+        <button id="user-profile" class="hidden items-center space-x-2 hover:text-primary transition-colors">
+          <i class="fa fa-user-circle-o text-xl"></i>
+          <span id="user-name" class="text-sm"></span>
+        </button>
+        <button id="login-btn" class="bg-primary hover:bg-primary/90 text-white px-4 py-2 rounded transition-colors">
+          <i class="fa fa-sign-in mr-1"></i> Sign In
+        </button>
+        <button id="logout-btn" class="hidden bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded transition-colors">
+          <i class="fa fa-sign-out mr-1"></i> Log Out
+        </button>
+      </div>
+    </nav>
+  </header>
+
+  <!-- Main content -->
+  <main class="flex-grow pt-16">
+    <!-- Login modal -->
+    <div id="login-modal" class="fixed inset-0 bg-black/80 z-50 flex items-center justify-center hidden">
+      <div class="bg-darker rounded-lg w-full max-w-md p-6 shadow-2xl transform transition-all duration-300 scale-100">
+        <div class="flex justify-between items-center mb-6">
+          <h2 class="text-xl font-bold">Sign In</h2>
+          <button id="close-login" class="text-gray-600 hover:text-light">
+            <i class="fa fa-times text-xl"></i>
+          </button>
+        </div>
+        
+        <div class="space-y-4">
+          <div class="flex border-b border-gray-700">
+            <button id="user-tab" class="flex-1 py-2 text-primary border-b-2 border-primary">User</button>
+            <button id="admin-tab" class="flex-1 py-2 text-gray-600 hover:text-light">Admin</button>
+          </div>
+          
+          <form id="login-form" class="space-y-4">
+            <div>
+              <label class="block text-sm mb-1">Username</label>
+              <input type="text" id="username" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" required>
+            </div>
+            <div>
+              <label class="block text-sm mb-1">Password</label>
+              <input type="password" id="password" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" required>
+            </div>
+            <button type="submit" class="w-full bg-primary hover:bg-primary/90 text-white py-2 rounded transition-colors">
+              Sign In
+            </button>
+          </form>
+          
+          <div class="text-center text-sm text-gray-600">
+            <p>No account yet?</p>
+            <button id="register-btn" class="text-primary hover:underline mt-1">Register now</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Register modal -->
+    <div id="register-modal" class="fixed inset-0 bg-black/80 z-50 flex items-center justify-center hidden">
+      <div class="bg-darker rounded-lg w-full max-w-md p-6 shadow-2xl">
+        <div class="flex justify-between items-center mb-6">
+          <h2 class="text-xl font-bold">Create Account</h2>
+          <button id="close-register" class="text-gray-600 hover:text-light">
+            <i class="fa fa-times text-xl"></i>
+          </button>
+        </div>
+        
+        <form id="register-form" class="space-y-4">
+          <div>
+            <label class="block text-sm mb-1">Username</label>
+            <input type="text" id="reg-username" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" required>
+          </div>
+          <div>
+            <label class="block text-sm mb-1">Password</label>
+            <input type="password" id="reg-password" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" required>
+          </div>
+          <div>
+            <label class="block text-sm mb-1">Email</label>
+            <input type="email" id="reg-email" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" required>
+          </div>
+          <button type="submit" class="w-full bg-primary hover:bg-primary/90 text-white py-2 rounded transition-colors">
+            Register
+          </button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Hero -->
+    <section class="relative h-[70vh] flex items-center justify-center overflow-hidden">
+      <div class="absolute inset-0 bg-gradient-to-t from-dark to-transparent z-10"></div>
+      <img src="https://picsum.photos/id/1074/1920/1080" alt="Movie background" class="absolute inset-0 w-full h-full object-cover">
+      <div class="relative z-20 text-center px-4 max-w-4xl mx-auto">
+        <h1 class="text-[clamp(2rem,5vw,4rem)] font-bold text-white text-shadow mb-4">
+          Explore a world of movies
+        </h1>
+        <p class="text-[clamp(1rem,2vw,1.25rem)] text-light text-shadow mb-8 max-w-2xl mx-auto">
+          Book tickets anytime and enjoy a premium cinema experience.
+        </p>
+        <button id="explore-btn" class="bg-primary hover:bg-primary/90 text-white px-8 py-3 rounded text-lg font-medium transition-all transform hover:scale-105">
+          <i class="fa fa-ticket mr-2"></i> Book Now
+        </button>
+      </div>
+    </section>
+
+    <!-- Movies -->
+    <section id="movies" class="py-12 px-4 md:px-8">
+      <div class="max-w-7xl mx-auto">
+        <h2 class="text-2xl md:text-3xl font-bold mb-8 flex items-center">
+          <i class="fa fa-film text-primary mr-2"></i>
+          Now Showing
+        </h2>
+        
+        <div id="movies-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+          <!-- Movie cards are rendered by JavaScript -->
+        </div>
+      </div>
+    </section>
+
+    <!-- Movie detail modal -->
+    <div id="movie-detail-modal" class="fixed inset-0 bg-black/80 z-50 flex items-center justify-center hidden">
+      <div class="bg-darker rounded-lg w-full max-w-5xl max-h-[90vh] overflow-y-auto p-6 shadow-2xl transform transition-all duration-300 scale-100">
+        <div class="flex justify-between items-center mb-6">
+          <h2 id="movie-title" class="text-xl md:text-2xl font-bold"></h2>
+          <button id="close-movie-detail" class="text-gray-600 hover:text-light">
+            <i class="fa fa-times text-xl"></i>
+          </button>
+        </div>
+        
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div class="md:col-span-1">
+            <img id="movie-poster" src="" alt="Movie poster" class="rounded-lg w-full h-auto object-cover shadow-lg">
+          </div>
+          
+          <div class="md:col-span-2">
+            <div class="space-y-4">
+              <p id="movie-description" class="text-gray-300"></p>
+              
+              <div class="border-t border-gray-800 pt-4">
+                <h3 class="text-lg font-medium mb-3">Select Showtime</h3>
+                <div id="showtimes-list" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                  <!-- Showtimes are rendered by JavaScript -->
+                </div>
+              </div>
+              
+              <button id="select-seats-btn" class="w-full bg-primary hover:bg-primary/90 text-white py-2 rounded transition-colors mt-4 disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                <i class="fa fa-arrow-right mr-1"></i> Select Seats
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Seat selection modal -->
+    <div id="seat-selection-modal" class="fixed inset-0 bg-black/80 z-50 flex items-center justify-center hidden">
+      <div class="bg-darker rounded-lg w-full max-w-4xl max-h-[90vh] overflow-y-auto p-6 shadow-2xl">
+        <div class="flex justify-between items-center mb-6">
+          <h2 class="text-xl font-bold">Select Seats</h2>
+          <button id="close-seat-selection" class="text-gray-600 hover:text-light">
+            <i class="fa fa-times text-xl"></i>
+          </button>
+        </div>
+        
+        <div class="text-center mb-6">
+          <h3 id="showtime-info" class="text-lg font-medium"></h3>
+        </div>
+        
+        <div class="flex justify-center mb-6">
+          <div class="w-full max-w-md">
+            <div class="bg-dark rounded-lg p-4 mb-4 text-center">
+              <p class="text-sm text-gray-400">Screen</p>
+            </div>
+            
+            <div id="seats-container" class="grid grid-cols-8 gap-2 mb-4">
+              <!-- Seats are rendered by JavaScript -->
+            </div>
+            
+            <div class="flex justify-center space-x-6 text-sm mt-4">
+              <div class="flex items-center">
+                <div class="w-6 h-6 rounded seat-available mr-2"></div>
+                <span>Available</span>
+              </div>
+              <div class="flex items-center">
+                <div class="w-6 h-6 rounded seat-selected mr-2"></div>
+                <span>Selected</span>
+              </div>
+              <div class="flex items-center">
+                <div class="w-6 h-6 rounded seat-unavailable mr-2"></div>
+                <span>Sold</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <div class="border-t border-gray-800 pt-4 mt-4">
+          <div class="flex justify-between items-center mb-4">
+            <span>Selected seats: <span id="selected-seats-count">0</span></span>
+            <span>Total: <span id="total-price">0</span> CNY</span>
+          </div>
+          
+          <button id="proceed-to-payment" class="w-full bg-primary hover:bg-primary/90 text-white py-2 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+            <i class="fa fa-credit-card mr-1"></i> Proceed to Payment
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Payment modal -->
+    <div id="payment-modal" class="fixed inset-0 bg-black/80 z-50 flex items-center justify-center hidden">
+      <div class="bg-darker rounded-lg w-full max-w-md p-6 shadow-2xl">
+        <div class="flex justify-between items-center mb-6">
+          <h2 class="text-xl font-bold">Payment</h2>
+          <button id="close-payment" class="text-gray-600 hover:text-light">
+            <i class="fa fa-times text-xl"></i>
+          </button>
+        </div>
+        
+        <div class="space-y-6">
+          <div class="border-b border-gray-800 pb-4">
+            <h3 class="text-lg font-medium mb-3">Order Summary</h3>
+            <div class="space-y-2 text-sm">
+              <div class="flex justify-between">
+                <span>Movie:</span>
+                <span id="payment-movie"></span>
+              </div>
+              <div class="flex justify-between">
+                <span>Showtime:</span>
+                <span id="payment-showtime"></span>
+              </div>
+              <div class="flex justify-between">
+                <span>Seats:</span>
+                <span id="payment-seats"></span>
+              </div>
+              <div class="flex justify-between font-medium pt-2">
+                <span>Total:</span>
+                <span id="payment-total"></span>
+              </div>
+            </div>
+          </div>
+          
+          <form id="payment-form" class="space-y-4">
+            <div>
+              <label class="block text-sm mb-1">Payment Method</label>
+              <div class="grid grid-cols-2 gap-2">
+                <label class="flex items-center p-3 bg-gray-800 rounded border border-gray-700 cursor-pointer hover:border-primary transition-colors">
+                  <input type="radio" name="payment-method" value="alipay" class="mr-2" checked>
+                  <i class="fa fa-alipay text-xl text-blue-400"></i>
+                </label>
+                <label class="flex items-center p-3 bg-gray-800 rounded border border-gray-700 cursor-pointer hover:border-primary transition-colors">
+                  <input type="radio" name="payment-method" value="wechat" class="mr-2">
+                  <i class="fa fa-wechat text-xl text-green-500"></i>
+                </label>
+              </div>
+            </div>
+            
+            <div>
+              <label class="block text-sm mb-1">Cardholder Name</label>
+              <input type="text" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" placeholder="John Doe">
+            </div>
+            
+            <div>
+              <label class="block text-sm mb-1">Card Number</label>
+              <input type="text" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" placeholder="**** **** **** 1234">
+            </div>
+            
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm mb-1">Expiry</label>
+                <input type="text" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" placeholder="MM/YY">
+              </div>
+              <div>
+                <label class="block text-sm mb-1">CVV</label>
+                <input type="text" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" placeholder="123">
+              </div>
+            </div>
+            
+            <button type="submit" class="w-full bg-primary hover:bg-primary/90 text-white py-2 rounded transition-colors">
+              <i class="fa fa-check mr-1"></i> Confirm Payment
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- Payment success modal -->
+    <div id="success-modal" class="fixed inset-0 bg-black/80 z-50 flex items-center justify-center hidden">
+      <div class="bg-darker rounded-lg w-full max-w-md p-6 shadow-2xl text-center">
+        <div class="text-primary text-5xl mb-4">
+          <i class="fa fa-check-circle"></i>
+        </div>
+        <h2 class="text-xl font-bold mb-2">Payment Successful!</h2>
+        <p class="text-gray-300 mb-6">Your tickets are booked. Thank you for your purchase!</p>
+        
+        <div class="bg-gray-800 rounded-lg p-4 mb-6 text-left">
+          <div class="space-y-2 text-sm">
+            <div class="flex justify-between">
+              <span>Order ID:</span>
+              <span id="order-number" class="font-mono"></span>
+            </div>
+            <div class="flex justify-between">
+              <span>Movie:</span>
+              <span id="success-movie"></span>
+            </div>
+            <div class="flex justify-between">
+              <span>Showtime:</span>
+              <span id="success-showtime"></span>
+            </div>
+            <div class="flex justify-between">
+              <span>Seats:</span>
+              <span id="success-seats"></span>
+            </div>
+          </div>
+        </div>
+        
+        <button id="close-success" class="w-full bg-primary hover:bg-primary/90 text-white py-2 rounded transition-colors">
+          Done
+        </button>
+      </div>
+    </div>
+
+    <!-- Order history -->
+    <section id="history" class="py-12 px-4 md:px-8 hidden">
+      <div class="max-w-7xl mx-auto">
+        <h2 class="text-2xl md:text-3xl font-bold mb-8 flex items-center">
+          <i class="fa fa-history text-primary mr-2"></i>
+          My Orders
+        </h2>
+        
+        <div id="orders-list" class="space-y-4">
+          <!-- Orders are rendered by JavaScript -->
+          <div class="text-center py-12 text-gray-600">
+            <i class="fa fa-folder-open text-4xl mb-3"></i>
+            <p>No orders yet</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Admin panel -->
+    <section id="admin" class="py-12 px-4 md:px-8 hidden">
+      <div class="max-w-7xl mx-auto">
+        <h2 class="text-2xl md:text-3xl font-bold mb-8 flex items-center">
+          <i class="fa fa-cog text-primary mr-2"></i>
+          Admin Panel
+        </h2>
+        
+        <!-- Navigation tabs -->
+        <div class="border-b border-gray-800 mb-6">
+          <div class="flex space-x-8">
+            <button id="admin-movies-tab" class="py-2 border-b-2 border-primary text-primary">Movie Management</button>
+            <button id="admin-reports-tab" class="py-2 border-b-2 border-transparent text-gray-600 hover:text-light transition-colors">Reports</button>
+          </div>
+        </div>
+        
+        <!-- Movie management -->
+        <div id="admin-movies" class="space-y-6">
+          <div class="flex justify-between items-center">
+            <h3 class="text-xl font-medium">Movie List</h3>
+            <button id="add-movie-btn" class="bg-primary hover:bg-primary/90 text-white px-4 py-2 rounded transition-colors">
+              <i class="fa fa-plus mr-1"></i> Add Movie
+            </button>
+          </div>
+          
+          <div id="admin-movies-list" class="bg-gray-900 rounded-lg overflow-hidden">
+            <div class="grid grid-cols-12 p-3 bg-gray-800 text-sm font-medium">
+              <div class="col-span-2">Poster</div>
+              <div class="col-span-3">Title</div>
+              <div class="col-span-4">Summary</div>
+              <div class="col-span-2">Status</div>
+              <div class="col-span-1">Actions</div>
+            </div>
+            <!-- Movie list is rendered by JavaScript -->
+          </div>
+        </div>
+        
+        <!-- Reports -->
+        <div id="admin-reports" class="hidden space-y-6">
+          <div class="flex justify-between items-center">
+            <h3 class="text-xl font-medium">Sales Reports</h3>
+            <div class="flex space-x-2">
+              <button id="daily-report-btn" class="bg-primary hover:bg-primary/90 text-white px-3 py-1 rounded text-sm transition-colors">Daily</button>
+              <button id="weekly-report-btn" class="bg-gray-800 hover:bg-gray-700 text-white px-3 py-1 rounded text-sm transition-colors">Weekly</button>
+              <button id="monthly-report-btn" class="bg-gray-800 hover:bg-gray-700 text-white px-3 py-1 rounded text-sm transition-colors">Monthly</button>
+            </div>
+          </div>
+          
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <div class="bg-gray-900 rounded-lg p-4">
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-sm text-gray-400">Sales Today</span>
+                <i class="fa fa-line-chart text-primary"></i>
+              </div>
+              <p class="text-2xl font-bold" id="daily-sales">CNY 0.00</p>
+            </div>
+            
+            <div class="bg-gray-900 rounded-lg p-4">
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-sm text-gray-400">Sales This Week</span>
+                <i class="fa fa-bar-chart text-primary"></i>
+              </div>
+              <p class="text-2xl font-bold" id="weekly-sales">CNY 0.00</p>
+            </div>
+            
+            <div class="bg-gray-900 rounded-lg p-4">
+              <div class="flex items-center justify-between mb-2">
+                <span class="text-sm text-gray-400">Sales This Month</span>
+                <i class="fa fa-pie-chart text-primary"></i>
+              </div>
+              <p class="text-2xl font-bold" id="monthly-sales">CNY 0.00</p>
+            </div>
+          </div>
+          
+          <div class="bg-gray-900 rounded-lg p-6">
+            <h4 class="text-lg font-medium mb-4">Top Movies by Revenue</h4>
+            <div id="movies-sales-chart" class="space-y-4">
+              <!-- Ranking is rendered by JavaScript -->
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Add movie modal -->
+    <div id="add-movie-modal" class="fixed inset-0 bg-black/80 z-50 flex items-center justify-center hidden">
+      <div class="bg-darker rounded-lg w-full max-w-4xl p-6 shadow-2xl overflow-y-auto max-h-[90vh]">
+        <div class="flex justify-between items-center mb-6">
+          <h2 id="add-movie-title" class="text-xl font-bold">Add New Movie</h2>
+          <button id="close-add-movie" class="text-gray-600 hover:text-light">
+            <i class="fa fa-times text-xl"></i>
+          </button>
+        </div>
+        
+        <form id="add-movie-form" class="space-y-6">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+              <label class="block text-sm mb-1">Title</label>
+              <input type="text" id="new-movie-title" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" required>
+            </div>
+            
+            <div>
+              <label class="block text-sm mb-1">Poster URL or path</label>
+              <input type="text" id="new-movie-poster" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" placeholder="poster/shawshank.jpg or https://example.com/poster.jpg" required>
+            </div>
+            
+            <div class="md:col-span-2">
+              <label class="block text-sm mb-1">Synopsis</label>
+              <textarea id="new-movie-description" rows="4" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" required></textarea>
+            </div>
+            
+            <div id="showtimes-section" class="md:col-span-2">
+              <h4 class="text-sm font-medium mb-3">Showtimes</h4>
+              <div id="showtimes-container" class="space-y-4">
+                <!-- Showtimes are added dynamically -->
+                <div class="showtime-item grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div>
+                    <label class="block text-sm mb-1">Date</label>
+                    <input type="date" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" required>
+                  </div>
+                  <div>
+                    <label class="block text-sm mb-1">Time</label>
+                    <input type="time" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" required>
+                  </div>
+                  <div>
+                    <label class="block text-sm mb-1">Hall</label>
+                    <select class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" required>
+                      <option value="">Select hall</option>
+                      <option value="Hall 1">Hall 1</option>
+                      <option value="Hall 2">Hall 2</option>
+                      <option value="Hall 3">Hall 3</option>
+                      <option value="Hall 4">Hall 4</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+              <button type="button" id="add-showtime-btn" class="mt-2 text-primary hover:underline text-sm">
+                <i class="fa fa-plus-circle mr-1"></i> Add Showtime
+              </button>
+            </div>
+          </div>
+          
+          <div class="flex justify-end space-x-4 pt-4">
+            <button type="button" id="cancel-add-movie" class="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded transition-colors">
+              Cancel
+            </button>
+            <button type="submit" class="px-4 py-2 bg-primary hover:bg-primary/90 text-white rounded transition-colors">
+              <i class="fa fa-save mr-1"></i> <span id="save-movie-label">Save Movie</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </main>
+
+  <!-- Footer -->
+  <footer class="bg-darker py-8 px-4 md:px-8">
+    <div class="max-w-7xl mx-auto">
+      <div class="flex flex-col md:flex-row justify-between items-center">
+        <div class="flex items-center space-x-2 mb-4 md:mb-0">
+          <i class="fa fa-film text-primary text-2xl"></i>
+          <h2 class="text-xl font-bold text-white">CineBook</h2>
+        </div>
+        
+        <div class="flex space-x-6 mb-4 md:mb-0">
+          <a href="#" class="text-gray-600 hover:text-primary transition-colors">
+            <i class="fa fa-weibo text-xl"></i>
+          </a>
+          <a href="#" class="text-gray-600 hover:text-primary transition-colors">
+            <i class="fa fa-wechat text-xl"></i>
+          </a>
+          <a href="#" class="text-gray-600 hover:text-primary transition-colors">
+            <i class="fa fa-instagram text-xl"></i>
+          </a>
+        </div>
+        
+        <div class="text-sm text-gray-600">
+          <p>&copy; 2023 CineBook. All rights reserved.</p>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Fallback data
+    let movies = [
+      {
+        id: 1,
+        title: "Interstellar",
+        poster: "https://picsum.photos/id/1000/300/450",
+        description: "In the near future, Earth is becoming uninhabitable. A team of explorers travels through a wormhole to find a new home for humanity.",
+        showtimes: [
+          { id: 101, date: "2023-10-15", time: "14:00", hall: "Hall 1", price: 50, seats: Array(64).fill(true) },
+          { id: 102, date: "2023-10-15", time: "16:30", hall: "Hall 2", price: 50, seats: Array(64).fill(true) },
+          { id: 103, date: "2023-10-15", time: "19:00", hall: "Hall 1", price: 60, seats: Array(64).fill(true) }
+        ]
+      },
+      {
+        id: 2,
+        title: "Inception",
+        poster: "https://picsum.photos/id/1015/300/450",
+        description: "A skilled thief who steals secrets from within dreams is offered a chance at redemption: planting an idea instead of stealing one.",
+        showtimes: [
+          { id: 201, date: "2023-10-15", time: "15:00", hall: "Hall 3", price: 55, seats: Array(64).fill(true) },
+          { id: 202, date: "2023-10-15", time: "18:30", hall: "Hall 4", price: 60, seats: Array(64).fill(true) }
+        ]
+      },
+      {
+        id: 3,
+        title: "The Shawshank Redemption",
+        poster: "https://picsum.photos/id/1018/300/450",
+        description: "A banker wrongly convicted forms a friendship in prison and finds hope and redemption.",
+        showtimes: [
+          { id: 301, date: "2023-10-15", time: "10:00", hall: "Hall 2", price: 45, seats: Array(64).fill(true) },
+          { id: 302, date: "2023-10-15", time: "13:30", hall: "Hall 3", price: 45, seats: Array(64).fill(true) }
+        ]
+      },
+      {
+        id: 4,
+        title: "Forrest Gump",
+        poster: "https://picsum.photos/id/1025/300/450",
+        description: "A man with a low IQ achieves remarkable things through persistence and kindness.",
+        showtimes: [
+          { id: 401, date: "2023-10-15", time: "11:00", hall: "Hall 4", price: 45, seats: Array(64).fill(true) },
+          { id: 402, date: "2023-10-15", time: "17:30", hall: "Hall 1", price: 55, seats: Array(64).fill(true) }
+        ]
+      }
+    ];
+
+    // User data
+    const users = [
+      { id: 1, username: "user", password: "123456", email: "user@example.com", role: "user" },
+      { id: 2, username: "admin", password: "1234", email: "admin@example.com", role: "admin" }
+    ];
+
+    // Order data
+    let orders = [];
+
+    // Global state
+    let currentUser = null;
+    let currentMovie = null;
+    let currentShowtime = null;
+    let selectedSeats = [];
+    let editingMovieId = null;
+
+    // DOM elements
+    const navbar = document.getElementById('navbar');
+    const loginBtn = document.getElementById('login-btn');
+    const logoutBtn = document.getElementById('logout-btn');
+    const userProfile = document.getElementById('user-profile');
+    const userName = document.getElementById('user-name');
+    const historyLink = document.getElementById('history-link');
+    const adminLink = document.getElementById('admin-link');
+    
+    const loginModal = document.getElementById('login-modal');
+    const closeLogin = document.getElementById('close-login');
+    const userTab = document.getElementById('user-tab');
+    const adminTab = document.getElementById('admin-tab');
+    const loginForm = document.getElementById('login-form');
+    
+    const registerModal = document.getElementById('register-modal');
+    const registerBtn = document.getElementById('register-btn');
+    const closeRegister = document.getElementById('close-register');
+    const registerForm = document.getElementById('register-form');
+    
+    const exploreBtn = document.getElementById('explore-btn');
+    const moviesGrid = document.getElementById('movies-grid');
+    
+    const movieDetailModal = document.getElementById('movie-detail-modal');
+    const closeMovieDetail = document.getElementById('close-movie-detail');
+    const movieTitle = document.getElementById('movie-title');
+    const moviePoster = document.getElementById('movie-poster');
+    const movieDescription = document.getElementById('movie-description');
+    const showtimesList = document.getElementById('showtimes-list');
+    const selectSeatsBtn = document.getElementById('select-seats-btn');
+    
+    const seatSelectionModal = document.getElementById('seat-selection-modal');
+    const closeSeatSelection = document.getElementById('close-seat-selection');
+    const showtimeInfo = document.getElementById('showtime-info');
+    const seatsContainer = document.getElementById('seats-container');
+    const selectedSeatsCount = document.getElementById('selected-seats-count');
+    const totalPrice = document.getElementById('total-price');
+    const proceedToPayment = document.getElementById('proceed-to-payment');
+    
+    const paymentModal = document.getElementById('payment-modal');
+    const closePayment = document.getElementById('close-payment');
+    const paymentForm = document.getElementById('payment-form');
+    const paymentMovie = document.getElementById('payment-movie');
+    const paymentShowtime = document.getElementById('payment-showtime');
+    const paymentSeats = document.getElementById('payment-seats');
+    const paymentTotal = document.getElementById('payment-total');
+    
+    const successModal = document.getElementById('success-modal');
+    const closeSuccess = document.getElementById('close-success');
+    const orderNumber = document.getElementById('order-number');
+    const successMovie = document.getElementById('success-movie');
+    const successShowtime = document.getElementById('success-showtime');
+    const successSeats = document.getElementById('success-seats');
+    
+    const historySection = document.getElementById('history');
+    const ordersList = document.getElementById('orders-list');
+    
+    const adminSection = document.getElementById('admin');
+    const adminMoviesTab = document.getElementById('admin-movies-tab');
+    const adminReportsTab = document.getElementById('admin-reports-tab');
+    const adminMovies = document.getElementById('admin-movies');
+    const adminReports = document.getElementById('admin-reports');
+    const addMovieBtn = document.getElementById('add-movie-btn');
+    const adminMoviesList = document.getElementById('admin-movies-list');
+    
+    const addMovieModal = document.getElementById('add-movie-modal');
+    const addMovieTitle = document.getElementById('add-movie-title');
+    const closeAddMovie = document.getElementById('close-add-movie');
+    const addShowtimeBtn = document.getElementById('add-showtime-btn');
+    const showtimesSection = document.getElementById('showtimes-section');
+    const showtimesContainer = document.getElementById('showtimes-container');
+    const cancelAddMovie = document.getElementById('cancel-add-movie');
+    const addMovieForm = document.getElementById('add-movie-form');
+    const saveMovieLabel = document.getElementById('save-movie-label');
+    
+    const dailyReportBtn = document.getElementById('daily-report-btn');
+    const weeklyReportBtn = document.getElementById('weekly-report-btn');
+    const monthlyReportBtn = document.getElementById('monthly-report-btn');
+    const dailySales = document.getElementById('daily-sales');
+    const weeklySales = document.getElementById('weekly-sales');
+    const monthlySales = document.getElementById('monthly-sales');
+    
+    // Initialization
+    async function init() {
+      checkAuth();
+      await loadMovies();
+      if (currentUser) {
+        await loadOrders();
+      } else {
+        updateOrdersList();
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      init();
+      
+      // Navbar scroll effect
+      window.addEventListener('scroll', () => {
+        if (window.scrollY > 50) {
+          navbar.classList.add('bg-dark/95', 'shadow-md');
+          navbar.classList.remove('bg-dark/80');
+        } else {
+          navbar.classList.remove('bg-dark/95', 'shadow-md');
+          navbar.classList.add('bg-dark/80');
+        }
+      });
+    });
+
+    // Auth
+    function checkAuth() {
+      const savedUser = localStorage.getItem('cinebook_user');
+      if (savedUser) {
+        currentUser = JSON.parse(savedUser);
+        updateUIAfterLogin();
+      }
+    }
+
+    function updateUIAfterLogin() {
+      loginBtn.classList.add('hidden');
+      logoutBtn.classList.remove('hidden');
+      userProfile.classList.remove('hidden');
+      userName.textContent = currentUser.username;
+      
+      if (currentUser.role === 'user') {
+        historyLink.classList.remove('hidden');
+      } else if (currentUser.role === 'admin') {
+        adminLink.classList.remove('hidden');
+      }
+    }
+
+    async function login(username, password, isAdmin) {
+      const role = isAdmin ? 'admin' : 'user';
+      try {
+        const user = await apiRequest('/auth/login', {
+          method: 'POST',
+          body: JSON.stringify({ username, password, role })
+        });
+        currentUser = user;
+        localStorage.setItem('cinebook_user', JSON.stringify(user));
+        updateUIAfterLogin();
+        loginModal.classList.add('hidden');
+        await loadOrders();
+        return true;
+      } catch (error) {
+        console.warn(error);
+        return false;
+      }
+    }
+
+    function logout() {
+      currentUser = null;
+      localStorage.removeItem('cinebook_user');
+      loginBtn.classList.remove('hidden');
+      logoutBtn.classList.add('hidden');
+      userProfile.classList.add('hidden');
+      historyLink.classList.add('hidden');
+      adminLink.classList.add('hidden');
+      historySection.classList.add('hidden');
+      adminSection.classList.add('hidden');
+      orders = [];
+      updateOrdersList();
+    }
+
+    async function register(username, password, email) {
+      try {
+        await apiRequest('/auth/register', {
+          method: 'POST',
+          body: JSON.stringify({ username, password, email })
+        });
+        return true;
+      } catch (error) {
+        console.warn(error);
+        return false;
+      }
+    }
+
+    // Render movie list
+    function renderMovies() {
+      moviesGrid.innerHTML = '';
+      
+      if (!Array.isArray(movies) || movies.length === 0) {
+        moviesGrid.innerHTML = `
+          <div class="col-span-full text-center text-gray-600 py-12">
+            <i class="fa fa-film text-4xl mb-3"></i>
+            <p>No movies available</p>
+          </div>
+        `;
+        return;
+      }
+      
+      movies.forEach(movie => {
+        const posterUrl = resolvePosterUrl(movie.poster);
+        const movieCard = document.createElement('div');
+        movieCard.className = 'bg-gray-900 rounded-lg overflow-hidden hover:shadow-lg transition-shadow group';
+        movieCard.innerHTML = `
+          <div class="relative overflow-hidden">
+            <img src="${posterUrl}" alt="${movie.title}" class="w-full h-80 object-cover transform group-hover:scale-105 transition-transform duration-300">
+            <div class="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center pb-6">
+              <button class="bg-primary hover:bg-primary/90 text-white px-4 py-2 rounded transition-colors" data-movie-id="${movie.id}">
+                <i class="fa fa-ticket mr-1"></i> Select Seats
+              </button>
+            </div>
+          </div>
+          <div class="p-4">
+            <h3 class="font-bold text-lg mb-1">${movie.title}</h3>
+            <p class="text-gray-400 text-sm line-clamp-2">${(movie.description || '').substring(0, 80)}...</p>
+          </div>
+        `;
+        
+        moviesGrid.appendChild(movieCard);
+        
+        // Add click handler
+        const buyBtn = movieCard.querySelector('button');
+        buyBtn.addEventListener('click', () => {
+          openMovieDetail(movie);
+        });
+      });
+    }
+
+    // Load movies
+    async function loadMovies() {
+      try {
+        const data = await apiRequest('/movies');
+        if (Array.isArray(data)) {
+          movies = data;
+        }
+      } catch (error) {
+        console.warn(error);
+        alert(`Failed to load movies: ${error.message}`);
+      }
+      renderMovies();
+      updateAdminMoviesList();
+    }
+
+    function openMovieDetail(movie) {
+      currentMovie = movie;
+      movieTitle.textContent = movie.title;
+      moviePoster.src = resolvePosterUrl(movie.poster);
+      moviePoster.alt = movie.title;
+      movieDescription.textContent = movie.description;
+      
+      // Render showtimes
+      showtimesList.innerHTML = '';
+      movie.showtimes.forEach(showtime => {
+        const showtimeEl = document.createElement('button');
+        showtimeEl.className = 'showtime-btn p-2 bg-gray-800 hover:bg-gray-700 rounded text-sm transition-colors';
+        showtimeEl.innerHTML = `
+          <div class="font-medium">${showtime.date}</div>
+          <div class="text-lg font-bold">${showtime.time}</div>
+          <div class="text-xs text-gray-400">${showtime.hall}</div>
+          <div class="text-xs text-primary">CNY ${showtime.price}</div>
+        `;
+        showtimeEl.dataset.showtimeId = showtime.id;
+        showtimeEl.addEventListener('click', () => {
+          selectShowtime(showtime, showtimeEl);
+        });
+        showtimesList.appendChild(showtimeEl);
+      });
+      
+      // Reset selection state
+      currentShowtime = null;
+      selectSeatsBtn.disabled = true;
+      if (currentUser && currentUser.role === 'admin') {
+        selectSeatsBtn.innerHTML = '<i class="fa fa-ban mr-1"></i> Admins cannot purchase tickets';
+      } else {
+        selectSeatsBtn.innerHTML = '<i class="fa fa-arrow-right mr-1"></i> Select Seats';
+      }
+      
+      movieDetailModal.classList.remove('hidden');
+    }
+
+    // Select showtime
+    function selectShowtime(showtime, button) {
+      currentShowtime = showtime;
+      
+      // Update button state
+      const isAdmin = currentUser && currentUser.role === 'admin';
+      selectSeatsBtn.disabled = isAdmin;
+      
+      // Highlight selected showtime
+      document.querySelectorAll('.showtime-btn').forEach(btn => {
+        btn.classList.remove('bg-primary', 'text-white');
+        btn.classList.add('bg-gray-800');
+      });
+      if (button) {
+        button.classList.remove('bg-gray-800');
+        button.classList.add('bg-primary', 'text-white');
+      }
+    }
+
+    // Open seat selection
+    function openSeatSelection() {
+      if (!currentShowtime) return;
+      if (currentUser && currentUser.role === 'admin') {
+        alert('Admins cannot purchase tickets.');
+        return;
+      }
+      
+      showtimeInfo.textContent = `${currentMovie.title} - ${currentShowtime.date} ${currentShowtime.time} ${currentShowtime.hall}`;
+      
+      // Render seats
+      seatsContainer.innerHTML = '';
+      selectedSeats = [];
+      
+      for (let i = 0; i < 64; i++) {
+        const seat = document.createElement('button');
+        seat.className = 'seat seat-available w-8 h-8 rounded flex items-center justify-center text-xs';
+        seat.textContent = String.fromCharCode(65 + Math.floor(i / 8)) + (i % 8 + 1);
+        seat.dataset.seatIndex = i;
+        
+        // Check if seat is sold
+        if (!currentShowtime.seats[i]) {
+          seat.classList.remove('seat-available');
+          seat.classList.add('seat-unavailable');
+        }
+        
+        seat.addEventListener('click', () => {
+          toggleSeatSelection(i);
+        });
+        
+        seatsContainer.appendChild(seat);
+      }
+      
+      updateSeatSelectionUI();
+      seatSelectionModal.classList.remove('hidden');
+    }
+
+    // Toggle seat selection
+    function toggleSeatSelection(index) {
+      // Sold seats cannot be selected
+      if (!currentShowtime.seats[index]) return;
+      
+      const seat = document.querySelector(`[data-seat-index="${index}"]`);
+      
+      if (selectedSeats.includes(index)) {
+        // Remove selection
+        selectedSeats = selectedSeats.filter(i => i !== index);
+        seat.classList.remove('seat-selected');
+        seat.classList.add('seat-available');
+      } else {
+        // Add selection
+        selectedSeats.push(index);
+        seat.classList.remove('seat-available');
+        seat.classList.add('seat-selected');
+      }
+      
+      updateSeatSelectionUI();
+    }
+
+    // Update seat selection UI
+    function updateSeatSelectionUI() {
+      selectedSeatsCount.textContent = selectedSeats.length;
+      totalPrice.textContent = selectedSeats.length * currentShowtime.price;
+      proceedToPayment.disabled = selectedSeats.length === 0;
+    }
+
+    // Open payment
+    function openPayment() {
+      if (selectedSeats.length === 0) return;
+      
+      // Fill payment details
+      paymentMovie.textContent = currentMovie.title;
+      paymentShowtime.textContent = `${currentShowtime.date} ${currentShowtime.time} ${currentShowtime.hall}`;
+      
+      // Format seat labels
+      const seatNumbers = selectedSeats.map(formatSeatLabel).join(', ');
+      paymentSeats.textContent = seatNumbers;
+      paymentTotal.textContent = formatCurrency(selectedSeats.length * currentShowtime.price);
+      
+      paymentModal.classList.remove('hidden');
+    }
+
+    // Create order
+    async function createOrder() {
+      if (!currentUser) {
+        loginModal.classList.remove('hidden');
+        return;
+      }
+      if (currentUser.role === 'admin') {
+        alert('Admins cannot purchase tickets.');
+        return;
+      }
+      
+      // Format seat labels
+      const seatNumbers = selectedSeats.map(formatSeatLabel).join(', ');
+      
+      // Create order request
+      const payload = {
+        userId: currentUser.id,
+        movieId: currentMovie.id,
+        showtimeId: currentShowtime.id,
+        seatIndices: selectedSeats
+      };
+      let order;
+      try {
+        order = await apiRequest('/orders', {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+      } catch (error) {
+        alert(`Order failed: ${error.message}`);
+        return;
+      }
+      
+      // Update seat state
+      selectedSeats.forEach(index => {
+        currentShowtime.seats[index] = false;
+      });
+      
+      // Show success modal
+      orderNumber.textContent = order.id;
+      successMovie.textContent = order.movieTitle || currentMovie.title;
+      successShowtime.textContent = `${currentShowtime.date} ${currentShowtime.time} ${currentShowtime.hall}`;
+      successSeats.textContent = order.seats || seatNumbers;
+      
+      paymentModal.classList.add('hidden');
+      successModal.classList.remove('hidden');
+      
+      // Refresh order list
+      await loadOrders();
+    }
+
+    // Load orders
+    async function loadOrders() {
+      if (!currentUser) {
+        orders = [];
+        updateOrdersList();
+        return;
+      }
+      try {
+        const data = await apiRequest(`/orders?userId=${currentUser.id}`);
+        orders = Array.isArray(data) ? data : [];
+      } catch (error) {
+        console.warn(error);
+        alert(`Failed to load orders: ${error.message}`);
+        orders = [];
+      }
+      updateOrdersList();
+    }
+
+    function updateOrdersList() {
+      if (!currentUser) {
+        ordersList.innerHTML = `
+          <div class="text-center py-12 text-gray-600">
+            <i class="fa fa-folder-open text-4xl mb-3"></i>
+            <p>Please sign in to view orders</p>
+          </div>
+        `;
+        return;
+      }
+      
+      const userOrders = orders.filter(order => order.userId === currentUser.id);
+      
+      if (userOrders.length === 0) {
+        ordersList.innerHTML = `
+          <div class="text-center py-12 text-gray-600">
+            <i class="fa fa-folder-open text-4xl mb-3"></i>
+            <p>No orders yet</p>
+          </div>
+        `;
+        return;
+      }
+      
+      ordersList.innerHTML = '';
+      userOrders.forEach(order => {
+        const orderEl = document.createElement('div');
+        orderEl.className = 'bg-gray-900 rounded-lg p-4 flex flex-col md:flex-row md:items-center';
+        orderEl.innerHTML = `
+          <div class="md:w-1/5 mb-4 md:mb-0">
+            <div class="text-sm text-gray-400">Order ID</div>
+            <div class="font-mono text-sm">${order.id}</div>
+          </div>
+          <div class="md:w-2/5 mb-4 md:mb-0">
+            <div class="font-medium">${order.movieTitle}</div>
+            <div class="text-sm text-gray-400">${order.showtime} ${order.hall}</div>
+          </div>
+          <div class="md:w-2/5 mb-4 md:mb-0">
+            <div class="text-sm text-gray-400">Seats</div>
+            <div>${order.seats}</div>
+          </div>
+          <div class="md:w-1/5 flex flex-col md:items-end">
+            <div class="text-primary font-medium">${formatCurrency(order.total)}</div>
+            <div class="text-xs text-gray-400">${order.orderDate ? new Date(order.orderDate).toLocaleString('en-US') : ''}</div>
+          </div>
+        `;
+        ordersList.appendChild(orderEl);
+      });
+    }
+
+    // Update admin movie list
+    function updateAdminMoviesList() {
+      adminMoviesList.innerHTML = `
+        <div class="grid grid-cols-12 p-3 bg-gray-800 text-sm font-medium">
+          <div class="col-span-2">Poster</div>
+          <div class="col-span-3">Title</div>
+          <div class="col-span-4">Summary</div>
+          <div class="col-span-2">Status</div>
+          <div class="col-span-1">Actions</div>
+        </div>
+      `;
+      
+      if (!Array.isArray(movies) || movies.length === 0) {
+        adminMoviesList.innerHTML += `
+          <div class="p-6 text-center text-gray-600">No movies available</div>
+        `;
+        return;
+      }
+
+      movies.forEach(movie => {
+        const posterUrl = resolvePosterUrl(movie.poster);
+        const movieEl = document.createElement('div');
+        movieEl.className = 'grid grid-cols-12 p-3 border-b border-gray-800 items-center';
+        movieEl.innerHTML = `
+          <div class="col-span-2">
+            <img src="${posterUrl}" alt="${movie.title}" class="w-16 h-auto rounded">
+          </div>
+          <div class="col-span-3 font-medium">${movie.title}</div>
+          <div class="col-span-4 text-sm text-gray-400 line-clamp-2">${movie.description || ''}</div>
+          <div class="col-span-2">
+            <span class="px-2 py-1 bg-green-900 text-green-300 rounded text-xs">Active</span>
+          </div>
+          <div class="col-span-1 flex space-x-1">
+            <button class="text-gray-400 hover:text-primary" data-action="edit" data-movie-id="${movie.id}">
+              <i class="fa fa-pencil"></i>
+            </button>
+            <button class="text-gray-400 hover:text-red-500" data-action="delete" data-movie-id="${movie.id}">
+              <i class="fa fa-trash"></i>
+            </button>
+          </div>
+        `;
+        adminMoviesList.appendChild(movieEl);
+        
+        // Add event listeners
+        const editBtn = movieEl.querySelector('[data-action="edit"]');
+        const deleteBtn = movieEl.querySelector('[data-action="delete"]');
+        
+        editBtn.addEventListener('click', () => {
+          openEditMovie(movie);
+        });
+        
+        deleteBtn.addEventListener('click', async () => {
+          if (!currentUser || currentUser.role !== 'admin') {
+            alert('Admin access requires an admin account.');
+            return;
+          }
+          if (confirm(`Delete movie "${movie.title}"?`)) {
+            const index = movies.findIndex(m => m.id === movie.id);
+            if (index !== -1) {
+              try {
+                await apiRequest(`/movies/${movie.id}`, {
+                  method: 'DELETE',
+                  headers: adminHeaders()
+                });
+                await loadMovies();
+              } catch (error) {
+                alert(`Failed to delete: ${error.message}`);
+              }
+            }
+          }
+        });
+      });
+    }
+
+    function setShowtimeInputsEnabled(enabled) {
+      if (!showtimesSection) {
+        return;
+      }
+      const fields = showtimesSection.querySelectorAll('input, select');
+      fields.forEach(field => {
+        field.disabled = !enabled;
+        field.required = enabled;
+      });
+    }
+
+    function resetShowtimeItems() {
+      const extraShowtimes = document.querySelectorAll('.showtime-item:not(:first-child)');
+      extraShowtimes.forEach(item => item.remove());
+      const firstItem = showtimesContainer.querySelector('.showtime-item');
+      if (firstItem) {
+        firstItem.querySelectorAll('input, select').forEach(field => {
+          field.value = '';
+        });
+      }
+    }
+
+    function setAddMode() {
+      editingMovieId = null;
+      if (addMovieTitle) {
+        addMovieTitle.textContent = 'Add New Movie';
+      }
+      if (saveMovieLabel) {
+        saveMovieLabel.textContent = 'Save Movie';
+      }
+      if (showtimesSection) {
+        showtimesSection.classList.remove('hidden');
+      }
+      setShowtimeInputsEnabled(true);
+    }
+
+    function setEditMode(movie) {
+      editingMovieId = movie.id;
+      if (addMovieTitle) {
+        addMovieTitle.textContent = 'Edit Movie';
+      }
+      if (saveMovieLabel) {
+        saveMovieLabel.textContent = 'Update Movie';
+      }
+      if (showtimesSection) {
+        showtimesSection.classList.add('hidden');
+      }
+      setShowtimeInputsEnabled(false);
+      document.getElementById('new-movie-title').value = movie.title || '';
+      document.getElementById('new-movie-poster').value = movie.poster || '';
+      document.getElementById('new-movie-description').value = movie.description || '';
+    }
+
+    function resetMovieForm() {
+      addMovieForm.reset();
+      resetShowtimeItems();
+      setAddMode();
+    }
+
+    function openEditMovie(movie) {
+      resetShowtimeItems();
+      setEditMode(movie);
+      addMovieModal.classList.remove('hidden');
+    }
+
+    // Add showtime
+    function addShowtimeField() {
+      const showtimeItem = document.createElement('div');
+      showtimeItem.className = 'showtime-item grid grid-cols-1 md:grid-cols-3 gap-4';
+      showtimeItem.innerHTML = `
+        <div>
+          <label class="block text-sm mb-1">Date</label>
+          <input type="date" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" required>
+        </div>
+        <div>
+          <label class="block text-sm mb-1">Time</label>
+          <input type="time" class="w-full bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" required>
+        </div>
+        <div class="flex flex-col">
+          <label class="block text-sm mb-1">Hall</label>
+          <div class="flex flex-1">
+            <select class="flex-1 bg-gray-800 border border-gray-700 rounded px-4 py-2 focus:outline-none focus:border-primary" required>
+              <option value="">Select hall</option>
+              <option value="Hall 1">Hall 1</option>
+              <option value="Hall 2">Hall 2</option>
+              <option value="Hall 3">Hall 3</option>
+              <option value="Hall 4">Hall 4</option>
+            </select>
+            <button type="button" class="remove-showtime-btn ml-2 text-red-500 hover:text-red-400 flex items-center justify-center">
+              <i class="fa fa-times-circle"></i>
+            </button>
+          </div>
+        </div>
+      `;
+      
+      showtimesContainer.appendChild(showtimeItem);
+      
+      // Add remove handler
+      const removeBtn = showtimeItem.querySelector('.remove-showtime-btn');
+      removeBtn.addEventListener('click', () => {
+        showtimeItem.remove();
+      });
+    }
+
+    // Event listeners
+    loginBtn.addEventListener('click', () => {
+      loginModal.classList.remove('hidden');
+    });
+    
+    closeLogin.addEventListener('click', () => {
+      loginModal.classList.add('hidden');
+    });
+    
+    userTab.addEventListener('click', () => {
+      userTab.classList.add('text-primary', 'border-primary');
+      userTab.classList.remove('text-gray-600');
+      adminTab.classList.remove('text-primary', 'border-primary');
+      adminTab.classList.add('text-gray-600');
+    });
+    
+    adminTab.addEventListener('click', () => {
+      adminTab.classList.add('text-primary', 'border-primary');
+      adminTab.classList.remove('text-gray-600');
+      userTab.classList.remove('text-primary', 'border-primary');
+      userTab.classList.add('text-gray-600');
+    });
+    
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const username = document.getElementById('username').value;
+      const password = document.getElementById('password').value;
+      const isAdmin = adminTab.classList.contains('border-primary');
+      
+      const success = await login(username, password, isAdmin);
+      
+      if (success) {
+        loginModal.classList.add('hidden');
+        alert('Signed in successfully.');
+      } else {
+        alert('Invalid username or password.');
+      }
+    });
+    
+    registerBtn.addEventListener('click', () => {
+      loginModal.classList.add('hidden');
+      registerModal.classList.remove('hidden');
+    });
+    
+    closeRegister.addEventListener('click', () => {
+      registerModal.classList.add('hidden');
+    });
+    
+    registerForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const username = document.getElementById('reg-username').value;
+      const password = document.getElementById('reg-password').value;
+      const email = document.getElementById('reg-email').value;
+      
+      const success = await register(username, password, email);
+      
+      if (success) {
+        registerModal.classList.add('hidden');
+        alert('Registration successful. Please sign in.');
+      } else {
+        alert('Username already exists.');
+      }
+    });
+    
+    logoutBtn.addEventListener('click', () => {
+      logout();
+    });
+    
+    exploreBtn.addEventListener('click', () => {
+      document.getElementById('movies').scrollIntoView({ behavior: 'smooth' });
+    });
+    
+    closeMovieDetail.addEventListener('click', () => {
+      movieDetailModal.classList.add('hidden');
+    });
+    
+    selectSeatsBtn.addEventListener('click', () => {
+      if (!currentUser) {
+        loginModal.classList.remove('hidden');
+        return;
+      }
+      if (currentUser.role === 'admin') {
+        alert('Admins cannot purchase tickets.');
+        return;
+      }
+      
+      movieDetailModal.classList.add('hidden');
+      openSeatSelection();
+    });
+    
+    closeSeatSelection.addEventListener('click', () => {
+      seatSelectionModal.classList.add('hidden');
+    });
+    
+    proceedToPayment.addEventListener('click', () => {
+      seatSelectionModal.classList.add('hidden');
+      openPayment();
+    });
+    
+    closePayment.addEventListener('click', () => {
+      paymentModal.classList.add('hidden');
+    });
+    
+    paymentForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      
+      // Simulate payment processing
+      setTimeout(async () => {
+        await createOrder();
+      }, 1500);
+    });
+    
+    closeSuccess.addEventListener('click', () => {
+      successModal.classList.add('hidden');
+      
+      // Reset state
+      currentMovie = null;
+      currentShowtime = null;
+      selectedSeats = [];
+    });
+    
+    // Navigation links
+    historyLink.addEventListener('click', async (e) => {
+      e.preventDefault();
+      if (!currentUser) {
+        loginModal.classList.remove('hidden');
+        return;
+      }
+      await loadOrders();
+
+      historySection.classList.remove('hidden');
+      adminSection.classList.add('hidden');
+      historySection.scrollIntoView({ behavior: 'smooth' });
+    });
+    
+    adminLink.addEventListener('click', async (e) => {
+      e.preventDefault();
+      if (!currentUser || currentUser.role !== 'admin') {
+        alert('Admin access requires an admin account.');
+        return;
+      }
+      await loadMovies();
+      setActiveReport('daily');
+      await loadReport('daily');
+      
+      adminSection.classList.remove('hidden');
+      historySection.classList.add('hidden');
+      adminSection.scrollIntoView({ behavior: 'smooth' });
+    });
+    
+    // Admin panel tabs
+    adminMoviesTab.addEventListener('click', () => {
+      adminMoviesTab.classList.add('text-primary', 'border-primary');
+      adminMoviesTab.classList.remove('text-gray-600');
+      adminReportsTab.classList.remove('text-primary', 'border-primary');
+      adminReportsTab.classList.add('text-gray-600');
+      
+      adminMovies.classList.remove('hidden');
+      adminReports.classList.add('hidden');
+      loadMovies();
+    });
+    
+    adminReportsTab.addEventListener('click', () => {
+      adminReportsTab.classList.add('text-primary', 'border-primary');
+      adminReportsTab.classList.remove('text-gray-600');
+      adminMoviesTab.classList.remove('text-primary', 'border-primary');
+      adminMoviesTab.classList.add('text-gray-600');
+      
+      adminReports.classList.remove('hidden');
+      adminMovies.classList.add('hidden');
+      setActiveReport('daily');
+      loadReport('daily');
+    });
+    
+    // Add movie
+    addMovieBtn.addEventListener('click', () => {
+      resetMovieForm();
+      addMovieModal.classList.remove('hidden');
+    });
+    
+    closeAddMovie.addEventListener('click', () => {
+      addMovieModal.classList.add('hidden');
+      resetMovieForm();
+    });
+    
+    cancelAddMovie.addEventListener('click', () => {
+      addMovieModal.classList.add('hidden');
+      resetMovieForm();
+    });
+    
+    addShowtimeBtn.addEventListener('click', addShowtimeField);
+    
+    addMovieForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      if (!currentUser || currentUser.role !== 'admin') {
+        alert('Admin access requires an admin account.');
+        return;
+      }
+      
+      const title = document.getElementById('new-movie-title').value;
+      const posterInput = document.getElementById('new-movie-poster').value;
+      const poster = ensurePosterPath(posterInput);
+      const description = document.getElementById('new-movie-description').value;
+
+      if (editingMovieId) {
+        const payload = {
+          title,
+          poster,
+          description
+        };
+        try {
+          await apiRequest(`/movies/${editingMovieId}`, {
+            method: 'PUT',
+            headers: adminHeaders(),
+            body: JSON.stringify(payload)
+          });
+          await loadMovies();
+        } catch (error) {
+          alert(`Failed to update movie: ${error.message}`);
+          return;
+        }
+
+        addMovieModal.classList.add('hidden');
+        resetMovieForm();
+        alert('Movie updated successfully.');
+        return;
+      }
+      
+      // Collect showtime data
+      const showtimeItems = document.querySelectorAll('.showtime-item');
+      const showtimes = [];
+      
+      showtimeItems.forEach((item, index) => {
+        const date = item.querySelector('input[type="date"]').value;
+        const time = item.querySelector('input[type="time"]').value;
+        const hall = item.querySelector('select').value;
+        
+        if (date && time && hall) {
+          showtimes.push({
+            date,
+            time,
+            hall,
+            price: 50, // Default price
+          });
+        }
+      });
+      
+      if (showtimes.length === 0) {
+        alert('Add at least one showtime.');
+        return;
+      }
+      
+      // Create new movie
+      const payload = {
+        title,
+        poster: poster || `https://picsum.photos/id/${Math.floor(Math.random() * 100)}/300/450`,
+        description,
+        showtimes
+      };
+      
+      try {
+        await apiRequest('/movies', {
+          method: 'POST',
+          headers: adminHeaders(),
+          body: JSON.stringify(payload)
+        });
+        await loadMovies();
+      } catch (error) {
+        alert(`Failed to add movie: ${error.message}`);
+        return;
+      }
+      
+      addMovieModal.classList.add('hidden');
+      resetMovieForm();
+      alert('Movie added successfully.');
+    });
+    
+    // Report actions
+    function setActiveReport(range) {
+      dailyReportBtn.classList.toggle('bg-primary', range === 'daily');
+      dailyReportBtn.classList.toggle('bg-gray-800', range !== 'daily');
+      weeklyReportBtn.classList.toggle('bg-primary', range === 'weekly');
+      weeklyReportBtn.classList.toggle('bg-gray-800', range !== 'weekly');
+      monthlyReportBtn.classList.toggle('bg-primary', range === 'monthly');
+      monthlyReportBtn.classList.toggle('bg-gray-800', range !== 'monthly');
+    }
+
+    async function loadReport(range) {
+      try {
+        const report = await apiRequest(`/reports?range=${range}`);
+        dailySales.textContent = formatCurrency(report.dailySales);
+        weeklySales.textContent = formatCurrency(report.weeklySales);
+        monthlySales.textContent = formatCurrency(report.monthlySales);
+        renderSalesRanking(report.movieSales);
+      } catch (error) {
+        alert(`Failed to load report: ${error.message}`);
+      }
+    }
+
+    function renderSalesRanking(movieSales) {
+      const chart = document.getElementById('movies-sales-chart');
+      if (!chart) {
+        return;
+      }
+      const items = Array.isArray(movieSales) ? movieSales.slice() : [];
+      items.sort((a, b) => {
+        const totalA = Number(a.total || 0);
+        const totalB = Number(b.total || 0);
+        if (totalB !== totalA) {
+          return totalB - totalA;
+        }
+        return String(a.title || '').localeCompare(String(b.title || ''), 'en', { sensitivity: 'base' });
+      });
+
+      if (items.length === 0) {
+        chart.innerHTML = '<div class="text-center text-gray-600">No sales yet</div>';
+        return;
+      }
+
+      chart.innerHTML = '';
+      items.forEach((item, index) => {
+        const title = item.title || 'Untitled';
+        const poster = resolvePosterUrl(item.poster) || `https://picsum.photos/seed/movie-${item.movieId || index}/64/96`;
+        const row = document.createElement('div');
+        row.className = 'flex items-center justify-between bg-gray-800/50 rounded p-3';
+        row.innerHTML = `
+          <div class="flex items-center space-x-3">
+            <span class="text-xs text-gray-400 w-6 text-right">#${index + 1}</span>
+            <img src="${poster}" alt="${title} poster" class="w-12 h-16 object-cover rounded">
+            <div>
+              <div class="font-medium">${title}</div>
+              <div class="text-xs text-gray-400">${formatCurrency(item.total)}</div>
+            </div>
+          </div>
+          <div class="text-primary font-medium">${formatCurrency(item.total)}</div>
+        `;
+        chart.appendChild(row);
+      });
+    }
+
+    dailyReportBtn.addEventListener('click', () => {
+      setActiveReport('daily');
+      loadReport('daily');
+    });
+    
+    weeklyReportBtn.addEventListener('click', () => {
+      setActiveReport('weekly');
+      loadReport('weekly');
+    });
+    
+    monthlyReportBtn.addEventListener('click', () => {
+      setActiveReport('monthly');
+      loadReport('monthly');
+    });
+    
+    // Close modal when clicking outside
+    [loginModal, registerModal, movieDetailModal, seatSelectionModal, paymentModal, successModal, addMovieModal].forEach(modal => {
+      modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+          modal.classList.add('hidden');
+        }
+      });
+    });
+  </script>
+</body>
+</html>
