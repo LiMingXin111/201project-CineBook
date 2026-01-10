@@ -1,0 +1,3 @@
+[main] INFO com.zaxxer.hikari.HikariDataSource - CineBookPool - Starting...
+[main] INFO com.zaxxer.hikari.pool.HikariPool - CineBookPool - Added connection com.mysql.cj.jdbc.ConnectionImpl@134593bf
+[main] INFO com.zaxxer.hikari.HikariDataSource - CineBookPool - Start completed.
